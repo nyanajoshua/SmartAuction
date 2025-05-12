@@ -365,3 +365,135 @@
 (define-read-only (get-auction-quantity (auction-id uint))
     (map-get? auction-quantities {auction-id: auction-id})
 )
+
+
+(define-constant err-invalid-duration (err u110))
+(define-constant min-duration u72)
+(define-constant max-duration u720)
+
+(define-public (update-auction-duration (auction-id uint) (new-duration uint))
+    (let (
+        (auction (unwrap! (map-get? auctions {auction-id: auction-id}) (err err-no-auction)))
+        (current-block stacks-block-height)
+        (new-end-block (+ current-block new-duration))
+    )
+    (asserts! (is-eq tx-sender (get seller auction)) (err err-not-owner))
+    (asserts! (is-eq (get status auction) "active") (err err-auction-ended))
+    (asserts! (>= new-duration min-duration) (err err-invalid-duration))
+    (asserts! (<= new-duration max-duration) (err err-invalid-duration))
+    
+    (map-set auctions
+        {auction-id: auction-id}
+        (merge auction {
+            end-block: new-end-block
+        })
+    )
+    (ok true))
+)
+
+
+(define-constant err-empty-bundle (err u130))
+(define-constant max-bundle-items u5)
+
+(define-map auction-bundles
+    { bundle-id: uint }
+    { 
+        item-names: (list 5 (string-ascii 50)),
+        item-count: uint
+    }
+)
+
+(define-public (create-bundle-auction
+    (items (list 5 (string-ascii 50)))
+    (description (string-ascii 200))
+    (start-price uint))
+    
+    (let (
+        (auction-id (+ (var-get auction-nonce) u1))
+        (item-count (len items))
+    )
+    (asserts! (> item-count u0) (err err-empty-bundle))
+    ;; (asserts! (<= item-count max-bundle-items) (err u131))
+    ;; (try! (stx-transfer? listing-fee tx-sender contract-owner))
+    
+    (map-set auctions
+        { auction-id: auction-id }
+        {
+            seller: tx-sender,
+            item-name: "Bundle",
+            description: description,
+            start-price: start-price,
+            end-block: (+ stacks-block-height auction-duration),
+            highest-bid: u0,
+            highest-bidder: none,
+            status: "active",
+            claimed: false
+        }
+    )
+    
+    (map-set auction-bundles
+        { bundle-id: auction-id }
+        {
+            item-names: items,
+            item-count: item-count
+        }
+    )
+    
+    (var-set auction-nonce auction-id)
+    (var-set total-auctions (+ (var-get total-auctions) u1))
+    (ok auction-id))
+)
+
+(define-read-only (get-bundle-details (bundle-id uint))
+    (map-get? auction-bundles {bundle-id: bundle-id})
+)
+
+
+(define-constant err-invalid-start-time (err u120))
+
+(define-map scheduled-auctions
+    { auction-id: uint }
+    { start-block: uint }
+)
+
+(define-public (create-scheduled-auction 
+    (item-name (string-ascii 50))
+    (description (string-ascii 200))
+    (start-price uint)
+    (start-block uint))
+    
+    (let (
+        (auction-id (+ (var-get auction-nonce) u1))
+        (current-block stacks-block-height)
+    )
+    (asserts! (> start-block current-block) (err err-invalid-start-time))
+    ;; (try! (stx-transfer? listing-fee tx-sender contract-owner))
+    
+    (map-set auctions
+        { auction-id: auction-id }
+        {
+            seller: tx-sender,
+            item-name: item-name,
+            description: description,
+            start-price: start-price,
+            end-block: (+ start-block auction-duration),
+            highest-bid: u0,
+            highest-bidder: none,
+            status: "scheduled",
+            claimed: false
+        }
+    )
+    
+    (map-set scheduled-auctions
+        { auction-id: auction-id }
+        { start-block: start-block }
+    )
+    
+    (var-set auction-nonce auction-id)
+    (var-set total-auctions (+ (var-get total-auctions) u1))
+    (ok auction-id))
+)
+
+(define-read-only (get-auction-start-time (auction-id uint))
+    (map-get? scheduled-auctions {auction-id: auction-id})
+)
