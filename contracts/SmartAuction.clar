@@ -497,3 +497,213 @@
 (define-read-only (get-auction-start-time (auction-id uint))
     (map-get? scheduled-auctions {auction-id: auction-id})
 )
+
+
+(define-public (claim-item-with-history (auction-id uint))
+    (let (
+        (auction (unwrap! (map-get? auctions {auction-id: auction-id}) (err err-no-auction)))
+    )
+    (asserts! (> stacks-block-height (get end-block auction)) (err err-auction-active))
+    (asserts! (is-eq (some tx-sender) (get highest-bidder auction)) (err err-unauthorized))
+    (asserts! (not (get claimed auction)) (err err-already-claimed))
+    
+    (map-set auctions
+        {auction-id: auction-id}
+        (merge auction {
+            status: "completed",
+            claimed: true
+        })
+    )
+    
+    (try! (record-auction-completion auction-id))
+    
+    (ok true))
+)
+
+
+(define-map auction-history
+    { auction-id: uint }
+    {
+        final-price: uint,
+        total-bids: uint,
+        completion-block: uint,
+        winner: (optional principal),
+        success: bool
+    }
+)
+
+(define-map user-statistics
+    { user: principal }
+    {
+        auctions-created: uint,
+        auctions-won: uint,
+        total-spent: uint,
+        total-earned: uint,
+        success-rate: uint
+    }
+)
+
+(define-map daily-stats
+    { day: uint }
+    {
+        auctions-completed: uint,
+        total-volume: uint,
+        average-price: uint,
+        unique-participants: uint
+    }
+)
+
+(define-map bid-history
+    { auction-id: uint, bid-sequence: uint }
+    {
+        bidder: principal,
+        amount: uint,
+        block-height: uint
+    }
+)
+
+(define-data-var total-platform-volume uint u0)
+(define-data-var total-completed-auctions uint u0)
+
+(define-public (record-auction-completion (auction-id uint))
+    (let (
+        (auction (unwrap! (map-get? auctions {auction-id: auction-id}) (err err-no-auction)))
+        (current-day (/ stacks-block-height u144))
+        (current-stats (default-to 
+            {auctions-completed: u0, total-volume: u0, average-price: u0, unique-participants: u0}
+            (map-get? daily-stats {day: current-day})))
+        (seller-stats (default-to 
+            {auctions-created: u0, auctions-won: u0, total-spent: u0, total-earned: u0, success-rate: u0}
+            (map-get? user-statistics {user: (get seller auction)})))
+        (final-price (get highest-bid auction))
+        (auction-success (> final-price u0))
+    )
+    
+    (asserts! (> stacks-block-height (get end-block auction)) (err err-auction-active))
+    
+    (map-set auction-history
+        {auction-id: auction-id}
+        {
+            final-price: final-price,
+            total-bids: (get-bid-count auction-id),
+            completion-block: stacks-block-height,
+            winner: (get highest-bidder auction),
+            success: auction-success
+        }
+    )
+    
+    (map-set user-statistics
+        {user: (get seller auction)}
+        (merge seller-stats {
+            total-earned: (+ (get total-earned seller-stats) final-price)
+        })
+    )
+    
+    (match (get highest-bidder auction)
+        winner (let (
+            (winner-stats (default-to 
+                {auctions-created: u0, auctions-won: u0, total-spent: u0, total-earned: u0, success-rate: u0}
+                (map-get? user-statistics {user: winner})))
+        )
+        (map-set user-statistics
+            {user: winner}
+            (merge winner-stats {
+                auctions-won: (+ (get auctions-won winner-stats) u1),
+                total-spent: (+ (get total-spent winner-stats) final-price)
+            })
+        ))
+        true
+    )
+    
+    (map-set daily-stats
+        {day: current-day}
+        (merge current-stats {
+            auctions-completed: (+ (get auctions-completed current-stats) u1),
+            total-volume: (+ (get total-volume current-stats) final-price)
+        })
+    )
+    
+    (var-set total-platform-volume (+ (var-get total-platform-volume) final-price))
+    (var-set total-completed-auctions (+ (var-get total-completed-auctions) u1))
+    
+    (ok true))
+)
+
+(define-public (record-bid-history (auction-id uint) (bid-sequence uint) (amount uint))
+    (begin
+        (map-set bid-history
+            {auction-id: auction-id, bid-sequence: bid-sequence}
+            {
+                bidder: tx-sender,
+                amount: amount,
+                block-height: stacks-block-height
+            }
+        )
+        (ok true))
+)
+
+(define-read-only (get-auction-history (auction-id uint))
+    (map-get? auction-history {auction-id: auction-id})
+)
+
+(define-read-only (get-user-statistics (user principal))
+    (map-get? user-statistics {user: user})
+)
+
+(define-read-only (get-daily-statistics (day uint))
+    (map-get? daily-stats {day: day})
+)
+
+(define-read-only (get-bid-history (auction-id uint) (bid-sequence uint))
+    (map-get? bid-history {auction-id: auction-id, bid-sequence: bid-sequence})
+)
+
+(define-read-only (get-platform-volume)
+    (var-get total-platform-volume)
+)
+
+(define-read-only (get-total-completed-auctions)
+    (var-get total-completed-auctions)
+)
+
+
+(define-read-only (get-user-success-rate (user principal))
+    (match (map-get? user-statistics {user: user})
+        stats (let (
+            (created (get auctions-created stats))
+            (won (get auctions-won stats))
+        )
+        (if (> created u0)
+            (/ (* won u100) created)
+            u0))
+        u0)
+)
+
+(define-read-only (get-bid-count (auction-id uint))
+    (let (
+        (count u0)
+    )
+    (fold count-bids (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) count))
+)
+
+(define-private (count-bids (sequence uint) (current-count uint))
+    (if (is-some (map-get? bid-history {auction-id: u1, bid-sequence: sequence}))
+        (+ current-count u1)
+        current-count)
+)
+
+(define-read-only (get-top-sellers (limit uint))
+    (ok "Feature requires off-chain indexing for complex queries")
+)
+
+(define-read-only (get-market-trends (days uint))
+    (let (
+        (current-day (/ stacks-block-height u144))
+        (start-day (- current-day days))
+    )
+    (ok {
+        period-start: start-day,
+        period-end: current-day,
+        total-days: days
+    }))
+)
